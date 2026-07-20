@@ -1,5 +1,6 @@
 import requests
 import streamlit as st
+from openai import APIError, RateLimitError
 
 from agent import (
     get_client,
@@ -66,6 +67,21 @@ if st.button("Analyze", type="primary", disabled=not url):
             f"Could not fetch the site: {exc}\n\n"
             "Check the URL, or the site may block automated access."
         )
+        st.stop()
+    except RateLimitError as exc:
+        # The free tier has a daily token budget; say so plainly instead of
+        # letting the provider's exception crash the page with a traceback.
+        st.warning(
+            "The LLM provider's free-tier rate limit was reached. "
+            "Nothing is broken — the quota refills over a rolling window, so "
+            "wait a few minutes and try again. Previously analyzed startups "
+            "are cached and still work.",
+            icon="⏳",
+        )
+        st.caption(f"Provider detail: {exc}")
+        st.stop()
+    except APIError as exc:
+        st.error(f"The LLM provider returned an error: {exc}")
         st.stop()
     except RuntimeError as exc:
         st.error(str(exc))
