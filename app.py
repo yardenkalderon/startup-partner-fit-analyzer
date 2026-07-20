@@ -33,7 +33,7 @@ if st.button("Analyze", type="primary", disabled=not url):
         with st.status("Comparing against the Siemens DISW portfolio...") as status:
             comparison = run_comparison(client, result["summary"])
             status.update(label="Comparison complete", state="complete")
-    except requests.RequestException as exc:
+    except (requests.RequestException, ValueError) as exc:
         st.error(
             f"Could not fetch the site: {exc}\n\n"
             "Check the URL, or the site may block automated access."

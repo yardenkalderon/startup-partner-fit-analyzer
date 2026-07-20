@@ -1,6 +1,8 @@
+import ipaddress
 import json
 import os
 import re
+import socket
 from urllib.parse import urljoin, urlparse
 
 import requests
@@ -13,6 +15,7 @@ from siemens_context import SIEMENS_DISW_CONTEXT
 
 MODEL = "llama-3.3-70b-versatile"
 FETCH_TIMEOUT = 15
+MAX_DOWNLOAD_BYTES = 2_000_000  # cap page downloads; a PDF/huge file gets cut off
 MAX_PAGE_CHARS = 6000  # keeps the whole conversation inside free-tier token limits
 MAX_AGENT_PAGES = 3    # extra pages the agent may read beyond the homepage
 MAX_AGENT_TURNS = 8
@@ -59,22 +62,70 @@ def _domain(url: str) -> str:
     return urlparse(url).netloc.lower().removeprefix("www.")
 
 
+def _canonical(url: str) -> str:
+    """Normalize a URL for dedup: drop query (utm_* etc.), fragment, trailing slash."""
+    p = urlparse(url)
+    return f"{p.scheme}://{(p.netloc or '').lower()}{p.path}".rstrip("/")
+
+
+def _same_site(url: str, base_url: str) -> bool:
+    """True for the same domain or a subdomain (docs.startup.com of startup.com)."""
+    d, b = _domain(url), _domain(base_url)
+    return d == b or d.endswith("." + b)
+
+
+def _assert_public_url(url: str) -> None:
+    """SSRF guard: only http(s) to hosts that resolve to public IPs."""
+    p = urlparse(url)
+    if p.scheme not in ("http", "https"):
+        raise ValueError("Only http/https URLs are allowed.")
+    host = p.hostname or ""
+    if not host or host == "localhost" or host.endswith(".local"):
+        raise ValueError("Blocked non-public host.")
+    try:
+        ips = [ipaddress.ip_address(host)]
+    except ValueError:
+        try:
+            infos = socket.getaddrinfo(host, None)
+        except socket.gaierror:
+            raise ValueError(f"Could not resolve host: {host}")
+        ips = [ipaddress.ip_address(info[4][0]) for info in infos]
+    if any(not ip.is_global for ip in ips):
+        raise ValueError("Blocked non-public address.")
+
+
 def fetch_page(url: str) -> tuple[str, list[str]]:
-    """Return (visible text, same-domain links) of a page."""
-    resp = requests.get(url, timeout=FETCH_TIMEOUT, headers={"User-Agent": USER_AGENT})
+    """Return (visible text, same-site links) of an HTML page.
+
+    Raises ValueError for blocked or non-HTML targets, requests.RequestException
+    for network errors.
+    """
+    _assert_public_url(url)
+    resp = requests.get(
+        url, timeout=FETCH_TIMEOUT, headers={"User-Agent": USER_AGENT}, stream=True
+    )
     resp.raise_for_status()
-    soup = BeautifulSoup(resp.text, "html.parser")
+    _assert_public_url(resp.url)  # re-check after redirects
+    ctype = resp.headers.get("Content-Type", "")
+    if "html" not in ctype.lower():
+        resp.close()
+        raise ValueError(f"Not an HTML page (Content-Type: {ctype or 'unknown'}).")
+    raw = next(resp.iter_content(MAX_DOWNLOAD_BYTES), b"")
+    html = raw.decode(resp.encoding or "utf-8", errors="replace")
+
+    soup = BeautifulSoup(html, "html.parser")
     for tag in soup(["script", "style", "noscript", "svg"]):
         tag.decompose()
-    text = re.sub(r"\s+", " ", soup.get_text(" ")).strip()[:MAX_PAGE_CHARS]
+    text = re.sub(r"\s+", " ", soup.get_text(" ")).strip()
+    text = re.sub(r"[<>]{3,}", " ", text)  # scrub our prompt delimiters from page text
+    text = text[:MAX_PAGE_CHARS]
 
     links: list[str] = []
     for a in soup.find_all("a", href=True):
-        href = urljoin(url, a["href"]).split("#")[0]
+        href = _canonical(urljoin(url, a["href"]))
         parsed = urlparse(href)
-        if parsed.scheme in ("http", "https") and _domain(href) == _domain(url):
-            href = href.rstrip("/")
-            if href and href != url.rstrip("/") and href not in links:
+        if parsed.scheme in ("http", "https") and _same_site(href, url):
+            if href and href != _canonical(url) and href not in links:
                 links.append(href)
     return text, links[:40]
 
@@ -128,22 +179,25 @@ def run_research_agent(client: Groq, url: str, on_event=lambda msg: None) -> dic
             return {"summary": str(reply["summary"]).strip(), "pages_read": pages_read}
 
         if reply and reply.get("action") == "read" and reply.get("url"):
-            page = normalize_url(str(reply["url"]))
+            page = _canonical(normalize_url(str(reply["url"])))
             if len(pages_read) > MAX_AGENT_PAGES:
                 feedback = "Page limit reached. Respond with the finish action now."
-            elif _domain(page) != _domain(url):
+            elif not _same_site(page, url):
                 feedback = f"{page} is outside the startup's website. Pick a link from the list or finish."
-            elif page.rstrip("/") in (p.rstrip("/") for p in pages_read):
+            elif page in (_canonical(p) for p in pages_read):
                 feedback = f"You already read {page}. Pick a different link or finish."
             else:
                 on_event(f"Agent chose to read: {page}")
                 try:
                     page_text, _ = fetch_page(page)
                     pages_read.append(page)
-                    feedback = f"Visible text of {page}:\n{page_text}"
-                except requests.RequestException as exc:
                     feedback = (
-                        f"Could not read {page} ({exc.__class__.__name__}). "
+                        f"Visible text of {page}:\n"
+                        f"<<<WEBSITE TEXT>>>\n{page_text}\n<<<END WEBSITE TEXT>>>"
+                    )
+                except (requests.RequestException, ValueError) as exc:
+                    feedback = (
+                        f"Could not read {page} ({exc}). "
                         "Pick a different link or finish."
                     )
         else:
