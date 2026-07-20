@@ -95,13 +95,13 @@ instruction the comparison would degenerate into "you are not as big as Microsof
 
 ## Tools and decisions
 
-| Choice | Why | Alternative rejected |
-|---|---|---|
-| Python + Streamlit | Task explicitly asked for minimal UI; a web app in pure Python | Flask/React — effort on the part declared unimportant |
-| Groq, `openai/gpt-oss-120b` | Free tier, fast, per-model quota | Alternatives measured; see below |
-| `requests` + BeautifulSoup | Verified upfront that the example sites serve static HTML | Headless browser — heavy and unnecessary here |
-| Hand-rolled agent loop | Every line is explainable | LangChain — hides the mechanics |
-| Static Siemens context | Reliable, token-cheap, still public sources | Live scraping of siemens.com |
+| Choice | Why |
+|---|---|
+| Python + Streamlit | The task asked for a minimal UI; a web app in pure Python |
+| Groq, `openai/gpt-oss-120b` | Free tier, fast, per-model quota |
+| `requests` + BeautifulSoup | The example sites serve static HTML |
+| Hand-rolled agent loop | Every line is explainable |
+| Static Siemens context | Reliable, token-cheap, still public sources |
 
 The Siemens portfolio summary in `siemens_context.py` was curated from live public
 pages rather than from model memory — which turned out to matter, since the design
@@ -114,9 +114,6 @@ Every model call goes through one function, and both supported providers speak t
 same OpenAI-compatible protocol, so **the provider is a config entry rather than a
 rewrite** (`PROVIDERS` in `agent.py`). Note that "OpenAI-compatible" describes a
 request format, not the vendor: requests go to Groq's or Google's servers.
-
-Gemini was evaluated as an alternative and rejected on measured latency and free-tier
-quota. Groq stays active.
 
 ### Caching
 
