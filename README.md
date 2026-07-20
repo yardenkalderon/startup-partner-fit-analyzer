@@ -4,7 +4,7 @@ A small web app that evaluates a startup as a potential **technology partner for
 Siemens Digital Industries Software (DISW)**, using an LLM agent and public
 sources only.
 
-**Live app:** https://startup-partner-fit-analyzer.streamlit.app/
+**Live app:** https://startup-partner-********************
 
 Enter a startup's URL (e.g. `https://www.manukai.ch/`) and the app returns a
 product summary, a comparison against the Siemens DISW portfolio, a partner-fit
