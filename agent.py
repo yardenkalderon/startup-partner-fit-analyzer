@@ -41,7 +41,7 @@ PROVIDERS = {
     "groq": {
         "secret": "GROQ_API_KEY",
         "base_url": "https://api.groq.com/openai/v1",
-        "model": "llama-3.3-70b-versatile",
+        "model": "openai/gpt-oss-120b",
         "extra": {},
     },
 }
