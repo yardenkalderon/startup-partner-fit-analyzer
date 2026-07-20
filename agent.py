@@ -167,8 +167,20 @@ def fetch_page(url: str) -> tuple[str, list[str]]:
     if "html" not in ctype.lower():
         resp.close()
         raise ValueError(f"Not an HTML page (Content-Type: {ctype or 'unknown'}).")
-    raw = next(resp.iter_content(MAX_DOWNLOAD_BYTES), b"")
-    html = raw.decode(resp.encoding or "utf-8", errors="replace")
+    # Accumulate chunks up to the cap. iter_content yields whatever arrived on
+    # the wire, so reading a single chunk truncates large pages to a fragment —
+    # which silently produced near-empty page text instead of an error.
+    chunks: list[bytes] = []
+    downloaded = 0
+    for chunk in resp.iter_content(65536):
+        chunks.append(chunk)
+        downloaded += len(chunk)
+        if downloaded >= MAX_DOWNLOAD_BYTES:
+            break
+    resp.close()
+    html = b"".join(chunks)[:MAX_DOWNLOAD_BYTES].decode(
+        resp.encoding or "utf-8", errors="replace"
+    )
 
     soup = BeautifulSoup(html, "html.parser")
     for tag in soup(["script", "style", "noscript", "svg"]):
