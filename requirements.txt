@@ -1,4 +1,4 @@
 streamlit
-groq
+openai
 requests
 beautifulsoup4

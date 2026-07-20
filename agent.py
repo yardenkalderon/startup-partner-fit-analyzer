@@ -3,21 +3,58 @@ import json
 import os
 import re
 import socket
+from typing import NamedTuple
 from urllib.parse import urljoin, urlparse
 
 import requests
 import streamlit as st
 from bs4 import BeautifulSoup
-from groq import Groq
+from openai import OpenAI
 
-from prompts import COMPARE_SYSTEM, RESEARCH_SYSTEM, compare_user_msg, research_user_msg
-from siemens_context import SIEMENS_DISW_CONTEXT
+from prompts import (
+    COMPARE_SYSTEM,
+    PARTNER_SYSTEM,
+    RESEARCH_SYSTEM,
+    compare_user_msg,
+    partner_user_msg,
+    research_user_msg,
+)
+from siemens_context import SIEMENS_DISW_CONTEXT, SIEMENS_PARTNERS
 
-MODEL = "llama-3.3-70b-versatile"
+# Both providers expose an OpenAI-compatible chat-completions endpoint, so one
+# client library serves both and switching providers is a config change.
+#
+# Groq is the active provider. Gemini was measured as an alternative and
+# rejected: gemini-3.5-flash's free tier allows only 20 requests/day, which is
+# roughly 4 analyses — worse than Groq's 100k tokens/day. Kept here documented
+# so the comparison is reproducible.
+PROVIDERS = {
+    "gemini": {
+        "secret": "GEMINI_API_KEY",
+        "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+        "model": "gemini-3.5-flash",
+        # Gemini's newer models think before answering and those thinking tokens
+        # count against max_tokens — at the default budget the JSON was truncated
+        # mid-string. "low" effort also cuts latency from ~32s to ~3s per call.
+        "extra": {"reasoning_effort": "low"},
+    },
+    "groq": {
+        "secret": "GROQ_API_KEY",
+        "base_url": "https://api.groq.com/openai/v1",
+        "model": "llama-3.3-70b-versatile",
+        "extra": {},
+    },
+}
+PROVIDER_ORDER = ["groq", "gemini"]
+
+MAX_OUTPUT_TOKENS = 2000  # must cover thinking tokens, not just the JSON reply
 FETCH_TIMEOUT = 15
 MAX_DOWNLOAD_BYTES = 2_000_000  # cap page downloads; a PDF/huge file gets cut off
-MAX_PAGE_CHARS = 6000  # keeps the whole conversation inside free-tier token limits
-MAX_AGENT_PAGES = 3    # extra pages the agent may read beyond the homepage
+# The agent loop resends the whole conversation on every turn, so page text is
+# the dominant token cost. Product info sits at the top of a page, so truncating
+# costs little.
+MAX_PAGE_CHARS = 3500
+MAX_AGENT_PAGES = 2    # extra pages the agent may read beyond the homepage
 MAX_AGENT_TURNS = 8
 USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
@@ -25,28 +62,48 @@ USER_AGENT = (
 )
 
 
-def _get_api_key() -> str | None:
-    # Local dev reads .streamlit/secrets.toml (gitignored); Community Cloud
-    # reads the same name from the app's Secrets settings.
+class LLM(NamedTuple):
+    """An LLM endpoint: which client to call, which model, and provider quirks."""
+
+    client: OpenAI
+    model: str
+    extra: dict
+    provider: str
+
+
+def _get_secret(name: str) -> str | None:
+    # Local dev reads .streamlit/secrets.toml (gitignored); Streamlit Cloud
+    # reads the same names from the app's Secrets settings.
     try:
-        key = st.secrets.get("GROQ_API_KEY", "")
+        value = st.secrets.get(name, "")
     except FileNotFoundError:
-        key = ""
-    return key or os.environ.get("GROQ_API_KEY") or None
+        value = ""
+    return value or os.environ.get(name) or None
 
 
-def get_client() -> Groq | None:
-    key = _get_api_key()
-    return Groq(api_key=key) if key else None
+def get_client() -> LLM | None:
+    """Return the first configured provider, preferring Gemini."""
+    for provider in PROVIDER_ORDER:
+        config = PROVIDERS[provider]
+        key = _get_secret(config["secret"])
+        if key:
+            return LLM(
+                client=OpenAI(api_key=key, base_url=config["base_url"]),
+                model=config["model"],
+                extra=config["extra"],
+                provider=provider,
+            )
+    return None
 
 
-def ping(client: Groq) -> str:
+def ping(llm: LLM) -> str:
     """Minimal call that verifies the API key and model are working."""
-    resp = client.chat.completions.create(
-        model=MODEL,
+    resp = llm.client.chat.completions.create(
+        model=llm.model,
         messages=[{"role": "user", "content": "Reply with the single word: ok"}],
-        max_tokens=5,
+        max_tokens=MAX_OUTPUT_TOKENS,
         temperature=0,
+        **llm.extra,
     )
     return resp.choices[0].message.content.strip()
 
@@ -130,22 +187,23 @@ def fetch_page(url: str) -> tuple[str, list[str]]:
     return text, links[:40]
 
 
-def _chat_json(client: Groq, messages: list[dict]) -> tuple[dict | None, str]:
-    resp = client.chat.completions.create(
-        model=MODEL,
+def _chat_json(llm: LLM, messages: list[dict]) -> tuple[dict | None, str]:
+    resp = llm.client.chat.completions.create(
+        model=llm.model,
         messages=messages,
         temperature=0.2,
-        max_tokens=1024,
+        max_tokens=MAX_OUTPUT_TOKENS,
         response_format={"type": "json_object"},
+        **llm.extra,
     )
-    raw = resp.choices[0].message.content
+    raw = resp.choices[0].message.content or ""
     try:
         return json.loads(raw), raw
     except json.JSONDecodeError:
         return None, raw
 
 
-def run_research_agent(client: Groq, url: str, on_event=lambda msg: None) -> dict:
+def run_research_agent(llm: LLM, url: str, on_event=lambda msg: None) -> dict:
     """Agent loop: the model decides which pages of the startup's site to read;
     our code enforces the guardrails (same domain, page cap, turn cap).
 
@@ -162,7 +220,7 @@ def run_research_agent(client: Groq, url: str, on_event=lambda msg: None) -> dic
     ]
 
     for _ in range(MAX_AGENT_TURNS):
-        reply, raw = _chat_json(client, messages)
+        reply, raw = _chat_json(llm, messages)
         messages.append({"role": "assistant", "content": raw})
 
         if reply and reply.get("action") == "finish" and reply.get("summary"):
@@ -213,7 +271,7 @@ def run_research_agent(client: Groq, url: str, on_event=lambda msg: None) -> dic
             "content": 'Respond now with {"action": "finish", "summary": "..."} based on what you have read.',
         }
     )
-    reply, _ = _chat_json(client, messages)
+    reply, _ = _chat_json(llm, messages)
     if reply and reply.get("summary"):
         return {"summary": str(reply["summary"]).strip(), "pages_read": pages_read}
     raise RuntimeError("The agent did not produce a summary. Try again.")
@@ -222,51 +280,108 @@ def run_research_agent(client: Groq, url: str, on_event=lambda msg: None) -> dic
 VALID_RELATIONSHIPS = {"complementary", "overlapping", "unrelated", "mixed"}
 
 
+def _check_text(reply: dict, field: str) -> str | None:
+    if not isinstance(reply.get(field), str) or not reply[field].strip():
+        return f"missing '{field}' text"
+    return None
+
+
+def _check_score(reply: dict, field: str) -> str | None:
+    score = reply.get(field)
+    if not isinstance(score, int) or isinstance(score, bool) or not 1 <= score <= 10:
+        return f"'{field}' must be an integer between 1 and 10"
+    return None
+
+
+def _check_str_list(reply: dict, field: str) -> str | None:
+    values = reply.get(field)
+    if (
+        not isinstance(values, list)
+        or not values
+        or not all(isinstance(v, str) and v.strip() for v in values)
+    ):
+        return f"'{field}' must be a non-empty list of strings"
+    return None
+
+
+def _coerce_score(reply: dict | None, field: str) -> None:
+    """Accept a float or numeric string where the prompt asked for an integer."""
+    if not isinstance(reply, dict):
+        return
+    score = reply.get(field)
+    if isinstance(score, float) and score.is_integer():
+        reply[field] = int(score)
+    elif isinstance(score, str) and score.strip().isdigit():
+        reply[field] = int(score.strip())
+
+
 def _validate_comparison(reply: dict | None) -> str | None:
     """Return an error message describing what is wrong, or None if valid."""
     if not isinstance(reply, dict):
         return "not a JSON object"
-    if not isinstance(reply.get("comparison"), str) or not reply["comparison"].strip():
-        return "missing 'comparison' text"
-    score = reply.get("score")
-    if not isinstance(score, int) or isinstance(score, bool) or not 1 <= score <= 10:
-        return "'score' must be an integer between 1 and 10"
-    just = reply.get("justifications")
-    if (
-        not isinstance(just, list)
-        or not just
-        or not all(isinstance(j, str) and j.strip() for j in just)
-    ):
-        return "'justifications' must be a non-empty list of strings"
     if reply.get("relationship") not in VALID_RELATIONSHIPS:
         return "'relationship' must be one of: complementary, overlapping, unrelated, mixed"
-    return None
+    return (
+        _check_text(reply, "comparison")
+        or _check_score(reply, "score")
+        or _check_str_list(reply, "justifications")
+    )
 
 
-def run_comparison(client: Groq, startup_summary: str) -> dict:
-    """One focused call: compare the startup to the DISW portfolio and score it.
+def _validate_partner(reply: dict | None) -> str | None:
+    if not isinstance(reply, dict):
+        return "not a JSON object"
+    return (
+        _check_str_list(reply, "closest_partners")
+        or _check_text(reply, "similarity_comparison")
+        or _check_score(reply, "similarity_score")
+        or _check_str_list(reply, "similarity_justifications")
+    )
 
-    The reply is validated in code; on failure the validation error is fed
-    back to the model for one retry.
+
+def _run_scored_call(llm: LLM, system: str, user: str, validate, score_field: str) -> dict:
+    """One focused call whose JSON reply is validated in code.
+
+    On failure the exact validation error is fed back to the model for one retry.
     """
     messages = [
-        {"role": "system", "content": COMPARE_SYSTEM},
-        {"role": "user", "content": compare_user_msg(startup_summary, SIEMENS_DISW_CONTEXT)},
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
     ]
     error = "no attempt"
     for _ in range(2):
-        reply, raw = _chat_json(client, messages)
-        if isinstance(reply, dict):
-            score = reply.get("score")
-            if isinstance(score, float) and score.is_integer():
-                reply["score"] = int(score)
-            elif isinstance(score, str) and score.strip().isdigit():
-                reply["score"] = int(score.strip())
-        error = _validate_comparison(reply)
+        reply, raw = _chat_json(llm, messages)
+        _coerce_score(reply, score_field)
+        error = validate(reply)
         if error is None:
             return reply
         messages.append({"role": "assistant", "content": raw})
         messages.append(
-            {"role": "user", "content": f"Invalid response ({error}). Return the corrected JSON object only."}
+            {
+                "role": "user",
+                "content": f"Invalid response ({error}). Return the corrected JSON object only.",
+            }
         )
-    raise RuntimeError(f"Comparison failed validation twice ({error}).")
+    raise RuntimeError(f"Model output failed validation twice ({error}).")
+
+
+def run_comparison(llm: LLM, startup_summary: str) -> dict:
+    """Compare the startup to the DISW product portfolio and score partner fit."""
+    return _run_scored_call(
+        llm,
+        COMPARE_SYSTEM,
+        compare_user_msg(startup_summary, SIEMENS_DISW_CONTEXT),
+        _validate_comparison,
+        "score",
+    )
+
+
+def run_partner_similarity(llm: LLM, startup_summary: str) -> dict:
+    """Score how closely the startup resembles Siemens' existing partners."""
+    return _run_scored_call(
+        llm,
+        PARTNER_SYSTEM,
+        partner_user_msg(startup_summary, SIEMENS_PARTNERS),
+        _validate_partner,
+        "similarity_score",
+    )
