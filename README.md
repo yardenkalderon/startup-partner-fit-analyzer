@@ -58,6 +58,10 @@ That last rule exists because a homepage is marketing copy. The prompt asks for 
 deeper page, and the code **rejects** a summary based only on the homepage. A
 prompt is a request; code is a rule.
 
+The summary must name the **target industry and customer type** explicitly, and
+say so when the site does not state them — two of the four scoring axes are about
+the customer, and the scoring stage sees only this summary.
+
 Fetching is restricted to public hosts and HTML pages, with a download cap, and
 scraped text is passed to the model as clearly delimited untrusted data.
 
@@ -165,7 +169,7 @@ German-language site:
 |---|---|---|---|
 | manukai.ch (AI for CNC programming) | 8/10 complementary | 8/10 | NX/CAM, Tecnomatix, Opcenter |
 | protex.ai (industrial safety AI) | 8/10 complementary | 8/10 | Insights Hub, Opcenter, Mendix |
-| enso.bot (AI marketing agents) | **2/10 unrelated** | 5/10 | Control: AI software, wrong domain |
+| enso.bot (AI marketing agents) | **2/10 unrelated** | 6/10 | Control: AI software, wrong domain |
 | wolt.com (food delivery) | **1/10 unrelated** | 2/10 | Control: obviously irrelevant |
 | sipgate.de (German) | — | — | English output confirmed |
 
