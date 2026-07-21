@@ -102,7 +102,7 @@ instruction the comparison would degenerate into "you are not as big as Microsof
 | Choice | Why |
 |---|---|
 | Python + Streamlit | The task asked for a minimal UI; a web app in pure Python |
-| Groq, `llama-3.3-70b-versatile` | Free tier, fast, per-model quota |
+| Groq, `openai/gpt-oss-120b` | Free tier, fast, per-model quota |
 | `requests` + BeautifulSoup | The example sites serve static HTML |
 | Hand-rolled agent loop | Every line is explainable |
 | Static Siemens context | Reliable, token-cheap, still public sources |
