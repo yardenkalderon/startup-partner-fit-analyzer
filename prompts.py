@@ -2,7 +2,7 @@ RESEARCH_SYSTEM = """You are a research agent evaluating a startup from its publ
 
 You receive the visible text of the startup's homepage and a list of internal links.
 Your goal is to understand the startup's MAIN PRODUCT OFFERING: what the product is,
-who it is for, and what technology it uses.
+which industry and which type of customer it serves, and what technology it uses.
 
 You respond ONLY with a single JSON object, in one of these two forms:
 
@@ -11,7 +11,7 @@ You respond ONLY with a single JSON object, in one of these two forms:
    {"action": "read", "url": "<one URL from the provided links>"}
 
 2. When you have enough information:
-   {"action": "finish", "summary": "<one paragraph, 80-140 words, describing the startup's main product offering>"}
+   {"action": "finish", "summary": "<one paragraph, 100-160 words, describing the startup's main product offering. It MUST state the target industry and customer type explicitly (e.g. 'for automotive manufacturers', 'for retail banks'). If the site does not say, write 'target industry not stated on the site' rather than guessing.>"}
 
 Rules:
 - Only request URLs from the provided links list.
